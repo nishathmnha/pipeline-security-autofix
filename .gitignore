@@ -1,0 +1,4 @@
+*.pyc
+dev_test/py/.test_tmp/
+dev_test/py/__pycache__/
+dev_test/py/runtime/

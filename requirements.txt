@@ -1,0 +1,6 @@
+fastapi
+httpx
+pydantic
+pydantic-settings
+uvicorn
+dotenv
