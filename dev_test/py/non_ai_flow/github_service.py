@@ -2,13 +2,37 @@ from __future__ import annotations
 
 import base64
 import os
+from typing import Any
 
 import httpx
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
-from .env_loader import load_project_env
+try:
+    from .env_loader import load_project_env
+except ImportError:  # pragma: no cover - support direct module execution
+    from env_loader import load_project_env
 
 
 load_project_env()
+
+
+router = APIRouter(tags=["github"])
+
+
+class GitHubFetchRequest(BaseModel):
+    repo_name: str
+    branch_name: str
+
+
+class GitHubPushRequest(BaseModel):
+    repo_name: str
+    base_branch: str
+    new_branch: str
+    target_file: str | None = None
+    target_path: str | None = None
+    updated_content: str
+    commit_message: str
 
 
 def _env_value(*names: str, default: str = "") -> str:
@@ -31,6 +55,13 @@ TARGET_FILE_NAMES = {
     "settings.gradle",
     "settings.gradle.kts",
 }
+
+
+def _preview_text(text: str, limit: int = 240) -> str:
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if len(normalized) <= limit:
+        return normalized
+    return f"{normalized[:limit].rstrip()}..."
 
 
 def _require_github_token() -> str:
@@ -245,3 +276,47 @@ def create_branch_and_push_file(
         "target_file": resolved_target_file,
         "compare_url": f"https://github.com/{owner}/{repo}/compare/{base_branch}...{new_branch}",
     }
+
+
+@router.post("/api/github/fetch-files")
+def github_fetch_files(payload: GitHubFetchRequest) -> dict[str, Any]:
+    try:
+        files = fetch_analysis_files(payload.repo_name, payload.branch_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=502, detail=f"GitHub fetch failed: {exc.response.status_code}") from exc
+
+    return {
+        "repo_name": payload.repo_name,
+        "branch_name": payload.branch_name,
+        "file_count": len(files),
+        "files": [
+            {
+                "path": path,
+                "preview": _preview_text(content),
+            }
+            for path, content in sorted(files.items())
+        ],
+    }
+
+
+@router.post("/api/github/push-file")
+def github_push_file(payload: GitHubPushRequest) -> dict[str, Any]:
+    try:
+        target_reference = (payload.target_path or payload.target_file or "").strip()
+        if not target_reference:
+            raise ValueError("Target path is required.")
+
+        return create_branch_and_push_file(
+            repo_name=payload.repo_name,
+            base_branch=payload.base_branch,
+            new_branch=payload.new_branch,
+            target_file=target_reference,
+            updated_content=payload.updated_content,
+            commit_message=payload.commit_message,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=502, detail=f"GitHub push failed: {exc.response.status_code}") from exc
