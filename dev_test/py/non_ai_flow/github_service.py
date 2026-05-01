@@ -35,6 +35,11 @@ class GitHubPushRequest(BaseModel):
     commit_message: str
 
 
+class GitHubFileUpdate(BaseModel):
+    path: str
+    updated_content: str
+
+
 def _env_value(*names: str, default: str = "") -> str:
     for name in names:
         value = os.getenv(name)
@@ -214,16 +219,47 @@ def create_branch_and_push_file(
     updated_content: str,
     commit_message: str,
 ) -> dict[str, str]:
+    result = create_branch_and_push_files(
+        repo_name=repo_name,
+        base_branch=base_branch,
+        new_branch=new_branch,
+        files=[{"path": target_file, "updated_content": updated_content}],
+        commit_message=commit_message,
+    )
+    first_file = result["changed_files"][0] if result["changed_files"] else {"path": target_file}
+    return {
+        "status": "pushed",
+        "branch_name": result["branch_name"],
+        "branch_created": result["branch_created"],
+        "target_file": first_file["path"],
+        "compare_url": result["compare_url"],
+    }
+
+
+def create_branch_and_push_files(
+    repo_name: str,
+    base_branch: str,
+    new_branch: str,
+    files: list[dict[str, str]],
+    commit_message: str,
+) -> dict[str, Any]:
     owner, repo = _repo_parts(repo_name)
     base_branch = base_branch.strip()
     new_branch = new_branch.strip()
-    target_file = target_file.strip()
     if not base_branch:
         raise ValueError("Base branch is required.")
     if not new_branch:
         raise ValueError("New branch is required.")
-    if not target_file:
-        raise ValueError("Target file is required.")
+    if not files:
+        raise ValueError("At least one file update is required.")
+
+    normalized_files: list[dict[str, str]] = []
+    for item in files:
+        target_path = str(item.get("path", "")).strip()
+        updated_content = str(item.get("updated_content", ""))
+        if not target_path:
+            raise ValueError("Each file update must include a path.")
+        normalized_files.append({"path": target_path, "updated_content": updated_content})
 
     with httpx.Client(base_url=GITHUB_API_URL, headers=_github_headers(), timeout=30.0) as client:
         ref_response = client.get(f"/repos/{owner}/{repo}/git/ref/heads/{base_branch}")
@@ -245,36 +281,66 @@ def create_branch_and_push_file(
             else:
                 raise ValueError(error_text)
 
-        content_ref = new_branch if branch_already_exists else base_branch
-        resolved_target_file = _resolve_target_file_path(client, owner, repo, content_ref, target_file)
+        changed_files: list[dict[str, str]] = []
+        for file_update in normalized_files:
+            content_ref = new_branch if branch_already_exists or changed_files else base_branch
+            resolved_target_file = _resolve_target_file_path(client, owner, repo, content_ref, file_update["path"])
 
-        content_response = client.get(
-            f"/repos/{owner}/{repo}/contents/{resolved_target_file}",
-            params={"ref": content_ref},
-        )
-        _raise_for_status(
-            content_response,
-            f"Fetching {resolved_target_file} from {repo_name}@{content_ref}",
-        )
-        existing_sha = content_response.json()["sha"]
+            content_response = client.get(
+                f"/repos/{owner}/{repo}/contents/{resolved_target_file}",
+                params={"ref": content_ref},
+            )
+            _raise_for_status(
+                content_response,
+                f"Fetching {resolved_target_file} from {repo_name}@{content_ref}",
+            )
+            existing_sha = content_response.json()["sha"]
 
-        update_response = client.put(
-            f"/repos/{owner}/{repo}/contents/{resolved_target_file}",
-            json={
-                "message": commit_message,
-                "content": base64.b64encode(updated_content.encode("utf-8")).decode("utf-8"),
-                "branch": new_branch,
-                "sha": existing_sha,
-            },
-        )
-        _raise_for_status(update_response, f"Updating {resolved_target_file} on branch {new_branch}")
+            update_response = client.put(
+                f"/repos/{owner}/{repo}/contents/{resolved_target_file}",
+                json={
+                    "message": commit_message,
+                    "content": base64.b64encode(file_update["updated_content"].encode("utf-8")).decode("utf-8"),
+                    "branch": new_branch,
+                    "sha": existing_sha,
+                },
+            )
+            _raise_for_status(update_response, f"Updating {resolved_target_file} on branch {new_branch}")
+            changed_files.append({"path": resolved_target_file})
 
     return {
         "status": "pushed",
         "branch_name": new_branch,
         "branch_created": not branch_already_exists,
-        "target_file": resolved_target_file,
+        "changed_files": changed_files,
         "compare_url": f"https://github.com/{owner}/{repo}/compare/{base_branch}...{new_branch}",
+    }
+
+
+def create_pull_request(
+    repo_name: str,
+    base_branch: str,
+    new_branch: str,
+    title: str,
+    body: str,
+) -> dict[str, str]:
+    owner, repo = _repo_parts(repo_name)
+    with httpx.Client(base_url=GITHUB_API_URL, headers=_github_headers(), timeout=30.0) as client:
+        pr_response = client.post(
+            f"/repos/{owner}/{repo}/pulls",
+            json={
+                "title": title,
+                "body": body,
+                "head": new_branch,
+                "base": base_branch,
+            },
+        )
+        _raise_for_status(pr_response, f"Creating pull request for {new_branch}")
+
+    payload = pr_response.json()
+    return {
+        "pull_request_url": str(payload.get("html_url", "")),
+        "pull_request_number": str(payload.get("number", "")),
     }
 
 

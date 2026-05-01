@@ -1,0 +1,16 @@
+{
+  "job_name": "spring-boot-backend",
+  "build_number": 10,
+  "build_url": "http://localhost:8080/job/spring-boot-backend/10/",
+  "repo": "nishathmnha/demo-springboot-vuln-service",
+  "branch": "main",
+  "target_branch": "main",
+  "status": "FAILED",
+  "console_output": "jenkins-webhook-and-github-setup/demo-springboot-vuln-service/pom.xml (pom)\n│                  Library                  │  Vulnerability   │ Severity │ Status │ Installed Version │        Fixed Version        │                            Title                             │\n│ org.apache.logging.log4j:log4j-core       │ CVE-2021-44228   │ CRITICAL │ fixed  │ 2.14.1            │ 2.17.1                      │ log4j-core remote code execution                             │",
+  "dependency_file_paths": [
+    "jenkins-webhook-and-github-setup/demo-springboot-vuln-service/pom.xml"
+  ],
+  "docker_file_paths": [
+    "jenkins-webhook-and-github-setup/demo-springboot-vuln-service/Dockerfile"
+  ]
+}

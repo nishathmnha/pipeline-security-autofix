@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="" xml:lang="">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>high-level-development-guide</title>
+  <style>
+    html {
+      line-height: 1.5;
+      font-family: Georgia, serif;
+      font-size: 20px;
+      color: #1a1a1a;
+      background-color: #fdfdfd;
+    }
+    body {
+      margin: 0 auto;
+      max-width: 36em;
+      padding-left: 50px;
+      padding-right: 50px;
+      padding-top: 50px;
+      padding-bottom: 50px;
+      hyphens: auto;
+      word-wrap: break-word;
+      text-rendering: optimizeLegibility;
+      font-kerning: normal;
+    }
+    @media (max-width: 600px) {
+      body {
+        font-size: 0.9em;
+        padding: 1em;
+      }
+    }
+    @media print {
+      body {
+        background-color: transparent;
+        color: black;
+        font-size: 12pt;
+      }
+      p, h2, h3 {
+        orphans: 3;
+        widows: 3;
+      }
+      h2, h3, h4 {
+        page-break-after: avoid;
+      }
+    }
+    p {
+      margin: 1em 0;
+    }
+    a {
+      color: #1a1a1a;
+    }
+    a:visited {
+      color: #1a1a1a;
+    }
+    img {
+      max-width: 100%;
+    }
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.4em;
+    }
+    h5, h6 {
+      font-size: 1em;
+      font-style: italic;
+    }
+    h6 {
+      font-weight: normal;
+    }
+    ol, ul {
+      padding-left: 1.7em;
+      margin-top: 1em;
+    }
+    li > ol, li > ul {
+      margin-top: 0;
+    }
+    blockquote {
+      margin: 1em 0 1em 1.7em;
+      padding-left: 1em;
+      border-left: 2px solid #e6e6e6;
+      color: #606060;
+    }
+    code {
+      font-family: Menlo, Monaco, 'Lucida Console', Consolas, monospace;
+      font-size: 85%;
+      margin: 0;
+    }
+    pre {
+      margin: 1em 0;
+      overflow: auto;
+    }
+    pre code {
+      padding: 0;
+      overflow: visible;
+    }
+    .sourceCode {
+     background-color: transparent;
+     overflow: visible;
+    }
+    hr {
+      background-color: #1a1a1a;
+      border: none;
+      height: 1px;
+      margin: 1em 0;
+    }
+    table {
+      margin: 1em 0;
+      border-collapse: collapse;
+      width: 100%;
+      overflow-x: auto;
+      display: block;
+      font-variant-numeric: lining-nums tabular-nums;
+    }
+    table caption {
+      margin-bottom: 0.75em;
+    }
+    tbody {
+      margin-top: 0.5em;
+      border-top: 1px solid #1a1a1a;
+      border-bottom: 1px solid #1a1a1a;
+    }
+    th {
+      border-top: 1px solid #1a1a1a;
+      padding: 0.25em 0.5em 0.25em 0.5em;
+    }
+    td {
+      padding: 0.125em 0.5em 0.25em 0.5em;
+    }
+    header {
+      margin-bottom: 4em;
+      text-align: center;
+    }
+    #TOC li {
+      list-style: none;
+    }
+    #TOC a:not(:hover) {
+      text-decoration: none;
+    }
+    code{white-space: pre-wrap;}
+    span.smallcaps{font-variant: small-caps;}
+    span.underline{text-decoration: underline;}
+    div.column{display: inline-block; vertical-align: top; width: 50%;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    ul.task-list{list-style: none;}
+    .display.math{display: block; text-align: center; margin: 0.5rem auto;}
+  </style>
+  <!--[if lt IE 9]>
+    <script src="//cdnjs.cloudflare.com/ajax/libs/html5shiv/3.7.3/html5shiv-printshiv.min.js"></script>
+  <![endif]-->
+</head>
+<body>
+<h1 id="high-level-development-guide">High-Level Development Guide</h1>
+<h2 id="1-delivery-strategy">1. Delivery strategy</h2>
+<p>Implement this in parallel with the current non-AI flow, not as a full replacement on day one.</p>
+<p>Recommended rollout:</p>
+<ol type="1">
+<li>keep current endpoints stable</li>
+<li>introduce LangGraph modules behind new services</li>
+<li>run the graph in shadow mode against stored events</li>
+<li>compare graph outputs against the current manual/tester flow</li>
+<li>enable auto-push only after validation quality is acceptable</li>
+</ol>
+<h2 id="2-phase-1-extract-the-orchestration-boundary">2. Phase 1: Extract the orchestration boundary</h2>
+<p>Goal:</p>
+<ul>
+<li>stop growing <code>jenkins_service.py</code></li>
+</ul>
+<p>Tasks:</p>
+<ul>
+<li>add a new graph package</li>
+<li>define <code>GraphState</code></li>
+<li>add a service that loads a stored event and converts it to graph input</li>
+<li>keep the webhook endpoint, but hand off to a graph runner instead of calling <code>_analyze_event()</code> directly</li>
+</ul>
+<p>Suggested rule:</p>
+<ul>
+<li>do not remove the current sync analyzer until the graph path is proven</li>
+</ul>
+<h2 id="3-phase-2-build-node-01-against-real-trivy-output">3. Phase 2: Build Node 01 against real Trivy output</h2>
+<p>Goal:</p>
+<ul>
+<li>parse the real payload already present in <code>requests.jsonl</code> and <code>dev_test/notebook/trivy_scan_input.txt</code></li>
+</ul>
+<p>Tasks:</p>
+<ul>
+<li>build a table parser for Trivy console output</li>
+<li>normalize findings into <code>VAFinding</code></li>
+<li>support repeated lines where one package spans several CVEs</li>
+<li>capture all fixed versions as a list</li>
+</ul>
+<p>Acceptance signal:</p>
+<ul>
+<li>the real stored sample should no longer end in <code>supported = false</code></li>
+<li>the parser should emit multiple findings and a meaningful issue summary</li>
+</ul>
+<h2 id="4-phase-3-build-node-02-repo-fetch-and-manifest-planning">4. Phase 3: Build Node 02 repo fetch and manifest planning</h2>
+<p>Goal:</p>
+<ul>
+<li>fetch source manifests and produce BOM-friendly remediation candidates</li>
+</ul>
+<p>Tasks:</p>
+<ul>
+<li>wrap current <code>fetch_analysis_files()</code> in a cleaner repo-reader service</li>
+<li>add parsers for Maven and Gradle control points</li>
+<li>detect parent POM, imported BOMs, <code>dependencyManagement</code>, Gradle platform usage, and property-managed versions</li>
+<li>add Dockerfile parsing for base image and package-manager upgrades</li>
+</ul>
+<p>Important design choice:</p>
+<ul>
+<li>Node 02 should produce candidate plans, not final approved changes</li>
+</ul>
+<h2 id="5-phase-4-build-node-03-validation">5. Phase 4: Build Node 03 validation</h2>
+<p>Goal:</p>
+<ul>
+<li>create a hard gate before any branch write</li>
+</ul>
+<p>Tasks:</p>
+<ul>
+<li>validate each candidate against manifest ownership rules</li>
+<li>collapse duplicate or conflicting changes</li>
+<li>mark plans as auto-safe, low-confidence, or manual-review-required</li>
+</ul>
+<p>Acceptance signal:</p>
+<ul>
+<li>a direct dependency version change must be rejected if a parent/BOM/property owns that version</li>
+<li>one approved plan should explain why it is the chosen BOM-friendly strategy</li>
+</ul>
+<h2 id="6-phase-5-build-node-04-github-multi-file-writer">6. Phase 5: Build Node 04 GitHub multi-file writer</h2>
+<p>Goal:</p>
+<ul>
+<li>write a full approved change set, not just one file</li>
+</ul>
+<p>Tasks:</p>
+<ul>
+<li>create a <code>github_writer</code> that can commit several files in one branch update</li>
+<li>keep compare URL / PR creation behavior similar to the current flow</li>
+<li>store branch result back into the run record</li>
+</ul>
+<p>Recommended implementation detail:</p>
+<ul>
+<li>use GitHub Git blobs/tree/commit APIs or a well-scoped sequence of contents API updates</li>
+<li>treat branch creation and PR creation as separate steps with explicit error reporting</li>
+</ul>
+<h2 id="7-phase-6-observability-and-operator-ux">7. Phase 6: Observability and operator UX</h2>
+<p>Goal:</p>
+<ul>
+<li>make graph execution inspectable</li>
+</ul>
+<p>Tasks:</p>
+<ul>
+<li>store node outputs by run</li>
+<li>expose run status endpoints</li>
+<li>show node-by-node progress in the dashboard</li>
+<li>preserve raw payload, extracted issue list, chosen remediation plan, validation notes, and push result</li>
+</ul>
+<h2 id="8-data-persistence-guidance">8. Data persistence guidance</h2>
+<p>Short term:</p>
+<ul>
+<li>reuse the current JSONL event store pattern for experiments</li>
+</ul>
+<p>Better next step:</p>
+<ul>
+<li>split event storage from graph-run storage</li>
+<li>add a persistent run/checkpoint store for node outputs and retries</li>
+</ul>
+<p>If LangGraph checkpointing is introduced, keep event metadata and graph state records clearly linked by <code>event_id</code> and <code>run_id</code>.</p>
+<h2 id="9-testing-guidance">9. Testing guidance</h2>
+<p>Prioritize tests in this order:</p>
+<ol type="1">
+<li>Node 01 parsing tests against full Trivy samples</li>
+<li>manifest parser tests for Maven/Gradle/Docker variations</li>
+<li>Node 03 validation tests for BOM-owned dependencies</li>
+<li>Node 04 GitHub writer tests for multi-file commits and existing-branch reuse</li>
+<li>API integration tests for webhook to graph-run creation</li>
+</ol>
+<p>Critical regression scenarios:</p>
+<ul>
+<li>vulnerability table with many rows</li>
+<li>package with multiple fixed versions</li>
+<li>parent-managed Spring Boot app</li>
+<li>imported BOM app</li>
+<li>multi-module Maven repo</li>
+<li>Gradle platform-managed app</li>
+<li>Docker-only remediation case</li>
+<li>mixed <code>pom.xml</code> plus <code>Dockerfile</code> remediation case</li>
+</ul>
+<h2 id="10-suggested-first-implementation-target">10. Suggested first implementation target</h2>
+<p>Best first slice:</p>
+<ol type="1">
+<li>webhook stores event</li>
+<li>Node 01 parses Trivy sample into structured findings</li>
+<li>Node 02 fetches repo files</li>
+<li>Node 03 marks plan as manual-review-required if full BOM logic is not ready</li>
+<li>Node 04 stays disabled</li>
+</ol>
+<p>That gives you visible AI progress early without risking bad automated commits.</p>
+</body>
+</html>

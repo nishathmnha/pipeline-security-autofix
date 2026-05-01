@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="" xml:lang="">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>current-and-target-flow</title>
+  <style>
+    html {
+      line-height: 1.5;
+      font-family: Georgia, serif;
+      font-size: 20px;
+      color: #1a1a1a;
+      background-color: #fdfdfd;
+    }
+    body {
+      margin: 0 auto;
+      max-width: 36em;
+      padding-left: 50px;
+      padding-right: 50px;
+      padding-top: 50px;
+      padding-bottom: 50px;
+      hyphens: auto;
+      word-wrap: break-word;
+      text-rendering: optimizeLegibility;
+      font-kerning: normal;
+    }
+    @media (max-width: 600px) {
+      body {
+        font-size: 0.9em;
+        padding: 1em;
+      }
+    }
+    @media print {
+      body {
+        background-color: transparent;
+        color: black;
+        font-size: 12pt;
+      }
+      p, h2, h3 {
+        orphans: 3;
+        widows: 3;
+      }
+      h2, h3, h4 {
+        page-break-after: avoid;
+      }
+    }
+    p {
+      margin: 1em 0;
+    }
+    a {
+      color: #1a1a1a;
+    }
+    a:visited {
+      color: #1a1a1a;
+    }
+    img {
+      max-width: 100%;
+    }
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.4em;
+    }
+    h5, h6 {
+      font-size: 1em;
+      font-style: italic;
+    }
+    h6 {
+      font-weight: normal;
+    }
+    ol, ul {
+      padding-left: 1.7em;
+      margin-top: 1em;
+    }
+    li > ol, li > ul {
+      margin-top: 0;
+    }
+    blockquote {
+      margin: 1em 0 1em 1.7em;
+      padding-left: 1em;
+      border-left: 2px solid #e6e6e6;
+      color: #606060;
+    }
+    code {
+      font-family: Menlo, Monaco, 'Lucida Console', Consolas, monospace;
+      font-size: 85%;
+      margin: 0;
+    }
+    pre {
+      margin: 1em 0;
+      overflow: auto;
+    }
+    pre code {
+      padding: 0;
+      overflow: visible;
+    }
+    .sourceCode {
+     background-color: transparent;
+     overflow: visible;
+    }
+    hr {
+      background-color: #1a1a1a;
+      border: none;
+      height: 1px;
+      margin: 1em 0;
+    }
+    table {
+      margin: 1em 0;
+      border-collapse: collapse;
+      width: 100%;
+      overflow-x: auto;
+      display: block;
+      font-variant-numeric: lining-nums tabular-nums;
+    }
+    table caption {
+      margin-bottom: 0.75em;
+    }
+    tbody {
+      margin-top: 0.5em;
+      border-top: 1px solid #1a1a1a;
+      border-bottom: 1px solid #1a1a1a;
+    }
+    th {
+      border-top: 1px solid #1a1a1a;
+      padding: 0.25em 0.5em 0.25em 0.5em;
+    }
+    td {
+      padding: 0.125em 0.5em 0.25em 0.5em;
+    }
+    header {
+      margin-bottom: 4em;
+      text-align: center;
+    }
+    #TOC li {
+      list-style: none;
+    }
+    #TOC a:not(:hover) {
+      text-decoration: none;
+    }
+    code{white-space: pre-wrap;}
+    span.smallcaps{font-variant: small-caps;}
+    span.underline{text-decoration: underline;}
+    div.column{display: inline-block; vertical-align: top; width: 50%;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    ul.task-list{list-style: none;}
+    .display.math{display: block; text-align: center; margin: 0.5rem auto;}
+  </style>
+  <!--[if lt IE 9]>
+    <script src="//cdnjs.cloudflare.com/ajax/libs/html5shiv/3.7.3/html5shiv-printshiv.min.js"></script>
+  <![endif]-->
+</head>
+<body>
+<h1 id="current-and-target-flow">Current And Target Flow</h1>
+<h2 id="current-system-sequence">Current system sequence</h2>
+<pre class="mermaid"><code>sequenceDiagram
+    participant J as Jenkins
+    participant A as FastAPI webhook
+    participant E as EventStore JSONL
+    participant R as Regex analyzer
+    participant G as GitHub service
+    participant GH as GitHub API
+
+    J-&gt;&gt;A: POST /api/v1/webhooks/jenkins/failure
+    A-&gt;&gt;A: Normalize payload and console_text
+    A-&gt;&gt;E: Store StoredEvent
+    A-&gt;&gt;R: _analyze_event(event)
+    R--&gt;&gt;A: Single analysis object
+    A-&gt;&gt;E: Save analysis back to event
+    A--&gt;&gt;J: 202 Accepted
+
+    Note over A,G: Later operator flow
+    A-&gt;&gt;G: prepare-fix / apply-fix
+    G-&gt;&gt;GH: fetch file or push file
+    GH--&gt;&gt;G: branch/PR result
+    G--&gt;&gt;A: proposal or push result
+    A-&gt;&gt;E: Persist proposal/github_result</code></pre>
+<h2 id="current-component-view">Current component view</h2>
+<pre class="mermaid"><code>flowchart LR
+    Jenkins[Jenkins failure webhook]
+    App[FastAPI app]
+    JS[jenkins_service.py]
+    GS[github_service.py]
+    UI[dashboard_ui.py]
+    Store[runtime/requests.jsonl]
+    GH[GitHub API]
+
+    Jenkins --&gt; App
+    App --&gt; JS
+    App --&gt; GS
+    App --&gt; UI
+    JS --&gt; Store
+    JS --&gt; GS
+    GS --&gt; GH</code></pre>
+<h2 id="target-system-sequence">Target system sequence</h2>
+<pre class="mermaid"><code>sequenceDiagram
+    participant J as Jenkins
+    participant A as FastAPI webhook
+    participant E as EventStore and RunStore
+    participant LG as LangGraph runner
+    participant N1 as Node01 extract issues
+    participant N2 as Node02 fetch and plan
+    participant N3 as Node03 validate BOM
+    participant N4 as Node04 push branch
+    participant GH as GitHub API
+
+    J-&gt;&gt;A: POST failure webhook with console_text
+    A-&gt;&gt;E: Persist raw event
+    A-&gt;&gt;LG: Start graph with event_id
+    A--&gt;&gt;J: 202 Accepted
+
+    LG-&gt;&gt;N1: Parse vulnerability output
+    N1-&gt;&gt;E: Save issue inventory
+    LG-&gt;&gt;N2: Fetch manifests and build candidate plans
+    N2-&gt;&gt;GH: Read repo files if needed
+    GH--&gt;&gt;N2: pom/gradle/docker contents
+    N2-&gt;&gt;E: Save remediation candidates
+    LG-&gt;&gt;N3: Validate BOM-friendly plan
+    N3-&gt;&gt;E: Save validation result
+
+    alt validation passes
+        LG-&gt;&gt;N4: Push approved change set
+        N4-&gt;&gt;GH: Create branch, commit files, open PR
+        GH--&gt;&gt;N4: branch and PR result
+        N4-&gt;&gt;E: Save final status
+    else manual review required
+        N3-&gt;&gt;E: Save blocked or review-required status
+    end</code></pre>
+<h2 id="target-component-view">Target component view</h2>
+<pre class="mermaid"><code>flowchart LR
+    Jenkins[Jenkins]
+    API[FastAPI webhook and run status APIs]
+    Store[EventStore and RunStore]
+    Graph[LangGraph workflow]
+    N1[Node01 issue extraction]
+    N2[Node02 manifest fetch and planning]
+    N3[Node03 BOM validation]
+    N4[Node04 branch push]
+    RepoReader[Repo reader service]
+    Parsers[Manifest parsers]
+    Validator[Validation service]
+    Writer[GitHub writer service]
+    GH[GitHub API]
+
+    Jenkins --&gt; API
+    API --&gt; Store
+    API --&gt; Graph
+    Graph --&gt; N1
+    Graph --&gt; N2
+    Graph --&gt; N3
+    Graph --&gt; N4
+    N2 --&gt; RepoReader
+    N2 --&gt; Parsers
+    N3 --&gt; Validator
+    N4 --&gt; Writer
+    RepoReader --&gt; GH
+    Writer --&gt; GH
+    N1 --&gt; Store
+    N2 --&gt; Store
+    N3 --&gt; Store
+    N4 --&gt; Store</code></pre>
+</body>
+</html>

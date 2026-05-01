@@ -216,7 +216,7 @@ TESTER_DASHBOARD_HTML = """<!DOCTYPE html>
           </label>
         </div>
         <label>
-          Target path
+          Target path (optional)
           <input id="push-target-path" value="" placeholder="jenkins-webhook-and-github-setup/demo-springboot-vuln-service/pom.xml">
         </label>
         <label>

@@ -21,12 +21,15 @@ try:
     from .app import app
     from .env_loader import load_project_env
     from . import github_service
+    from . import remediation_flow
 except ImportError:  # pragma: no cover - support direct module execution
     from app import app
     from env_loader import load_project_env
     import github_service
+    import remediation_flow
 
 load_project_env()
+github_branch_ops = github_service
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -360,50 +363,17 @@ def _solution_kind_for_target(target_file: str) -> str:
 
 def _analyze_event(event: StoredEvent) -> dict[str, Any]:
     console_text = event.console_text or _extract_payload_console_text(event.payload, event.raw_body)
-    cve_ids = _extract_cve_ids(console_text)
-    package_name, current_version, recommended_version, explicit_target = _extract_package_versions(console_text)
-    target_file = _determine_target_file(event, console_text, explicit_target)
-    solution_kind = _solution_kind_for_target(target_file)
-    supported = bool(package_name and current_version and recommended_version)
-    confidence = 0.91 if supported else 0.20
-
-    recommendation = (
-        "Prefer upgrading the BOM, parent, or managed property before hard-coding a dependency version."
-        if solution_kind == "bom-friendly-upgrade"
-        else "Upgrade the vulnerable version in the deployment manifest."
+    state = remediation_flow.build_state_from_event(
+        event_id=event.event_id,
+        console_text=console_text,
+        payload=event.payload if isinstance(event.payload, dict) else {},
+        local_repo_path=event.local_repo_path,
     )
-    summary = (
-        f"{package_name} should move from {current_version} to {recommended_version} in {target_file}."
-        if supported
-        else "The failure payload was captured, but the log pattern was not specific enough for a safe automatic patch."
-    )
-
-    actions = []
-    if supported:
-        actions.append(f"Review {target_file} for {package_name} version {current_version}.")
-        actions.append(f"Apply {recommended_version} using a {solution_kind} strategy.")
-        if solution_kind == "bom-friendly-upgrade":
-            actions.append("If the dependency is managed by a Spring Boot parent or BOM, update that source instead of adding a new inline version.")
-
-    return {
-        "analysis_id": f"an_{uuid4().hex[:10]}",
-        "event_id": event.event_id,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "supported": supported,
-        "issue_type": "VULNERABILITY" if supported else "UNSUPPORTED",
-        "confidence": confidence,
-        "package_name": package_name,
-        "current_version": current_version,
-        "recommended_version": recommended_version,
-        "target_file": target_file,
-        "solution_kind": solution_kind,
-        "cve_ids": cve_ids,
-        "summary": summary,
-        "recommendation": recommendation,
-        "actions": actions,
-        "repo": _event_payload_value(event, "repo"),
-        "branch": _event_payload_value(event, "branch"),
-    }
+    remediation_flow.run_node_01(state)
+    analysis = remediation_flow.build_analysis_response(state)
+    analysis["repo"] = _event_payload_value(event, "repo")
+    analysis["branch"] = _event_payload_value(event, "branch")
+    return analysis
 
 
 def _resolve_target_file(event: StoredEvent, target_file: str) -> Path | None:
@@ -509,94 +479,30 @@ def _build_branch_name(analysis: dict[str, Any]) -> str:
 
 
 def _prepare_fix(event: StoredEvent, analysis: dict[str, Any]) -> dict[str, Any]:
-    target_file = str(analysis.get("target_file") or "Dockerfile")
-    target_path = _resolve_target_file(event, target_file)
-    base_branch = str(analysis.get("branch") or DEFAULT_BASE_BRANCH)
-    current_version = str(analysis.get("current_version") or "")
-    recommended_version = str(analysis.get("recommended_version") or "")
-    package_name = analysis.get("package_name")
-
-    if target_path:
-        original_content = target_path.read_text(encoding="utf-8")
-    else:
-        repo_name = _event_payload_value(event, "repo")
-        original_content = (
-            _fetch_github_file_content(repo_name, target_file, base_branch)
-            if isinstance(repo_name, str) and "/" in repo_name
-            else None
-        )
-
-    if original_content is None:
-        return {
-            "proposal_id": f"fp_{uuid4().hex[:10]}",
-            "event_id": event.event_id,
-            "analysis_id": analysis.get("analysis_id"),
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "status": "manual-review-required",
-            "branch_name": _build_branch_name(analysis),
-            "target_file": target_file,
-            "target_file_path": str(target_path) if target_path else None,
-            "patch_strategy": "source-content-unavailable",
-            "diff_preview": [],
-            "pr_title": f"Review vulnerability remediation for {target_file}",
-            "pr_body": (
-                "The payload was analyzed successfully, but the service could not read the source file content "
-                "from a local checkout or GitHub. Provide local_repo_path or enable live GitHub access."
-            ),
-            "updated_file_content": "",
-            "original_file_content": "",
-            "package_name": package_name,
-            "current_version": current_version,
-            "recommended_version": recommended_version,
-        }
-
-    updated_content, patch_strategy, patched = _patch_file_content(
-        target_file=target_file,
-        original_content=original_content,
-        package_name=package_name,
-        current_version=current_version,
-        recommended_version=recommended_version,
+    console_text = event.console_text or _extract_payload_console_text(event.payload, event.raw_body)
+    state = remediation_flow.build_state_from_event(
+        event_id=event.event_id,
+        console_text=console_text,
+        payload=event.payload if isinstance(event.payload, dict) else {},
+        local_repo_path=event.local_repo_path,
     )
-    diff_preview = _build_diff_preview(original_content, updated_content) if patched else []
-
-    summary = analysis.get("summary") or "Automated remediation proposal."
-    pr_title = f"Fix vulnerability in {target_file}: {package_name}"
-    pr_body = (
-        f"{summary}\n\n"
-        f"- Base branch: {base_branch}\n"
-        f"- Target file: {target_file}\n"
-        f"- Patch strategy: {patch_strategy}\n"
-        f"- Recommendation: {analysis.get('recommendation') or 'Review before merge'}\n"
-    )
-
-    return {
-        "proposal_id": f"fp_{uuid4().hex[:10]}",
-        "event_id": event.event_id,
-        "analysis_id": analysis.get("analysis_id"),
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "status": "ready" if patched else "manual-review-required",
-        "branch_name": _build_branch_name(analysis),
-        "target_file": target_file,
-        "target_file_path": str(target_path) if target_path else None,
-        "patch_strategy": patch_strategy,
-        "diff_preview": diff_preview,
-        "pr_title": pr_title,
-        "pr_body": pr_body,
-        "updated_file_content": updated_content,
-        "original_file_content": original_content,
-        "package_name": package_name,
-        "current_version": current_version,
-        "recommended_version": recommended_version,
-    }
+    remediation_flow.run_node_01(state)
+    remediation_flow.run_node_02(state, DEFAULT_BASE_BRANCH)
+    remediation_flow.run_node_03(state)
+    return remediation_flow.build_proposal_response(state, analysis.get("analysis_id"))
 
 
-def _write_artifact(event: StoredEvent, proposal: dict[str, Any]) -> Path:
+def _write_artifacts(event: StoredEvent, proposal: dict[str, Any]) -> list[Path]:
     artifact_dir = REMEDIATION_DIR / event.event_id / str(proposal["proposal_id"])
     artifact_dir.mkdir(parents=True, exist_ok=True)
-    target_file = Path(str(proposal["target_file"]))
-    artifact_path = artifact_dir / target_file.name
-    artifact_path.write_text(str(proposal.get("updated_file_content") or ""), encoding="utf-8")
-    return artifact_path
+    written_paths: list[Path] = []
+    for file_change in proposal.get("validated_change_plan", {}).get("file_changes", []):
+        relative_path = Path(str(file_change["path"]))
+        artifact_path = artifact_dir / relative_path
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        artifact_path.write_text(str(file_change.get("updated_content") or ""), encoding="utf-8")
+        written_paths.append(artifact_path)
+    return written_paths
 
 
 def _repo_parts(repo_name: str) -> tuple[str, str]:
@@ -635,9 +541,12 @@ def _apply_fix_to_github(event: StoredEvent, proposal: dict[str, Any], base_bran
     if not isinstance(repo_name, str) or "/" not in repo_name:
         raise HTTPException(status_code=400, detail="Webhook payload must include repo in owner/name format.")
 
-    artifact_path = _write_artifact(event, proposal)
+    file_changes = proposal.get("validated_change_plan", {}).get("file_changes", [])
+    if not file_changes:
+        raise HTTPException(status_code=400, detail="No validated file changes are available to push.")
+
+    artifact_paths = _write_artifacts(event, proposal)
     branch_name = str(proposal["branch_name"])
-    target_file = str(proposal["target_file"])
 
     if GITHUB_DRY_RUN or not GITHUB_TOKEN:
         owner, repo = _repo_parts(repo_name)
@@ -646,63 +555,37 @@ def _apply_fix_to_github(event: StoredEvent, proposal: dict[str, Any], base_bran
             "base_branch": base_branch,
             "branch_name": branch_name,
             "pull_request_url": f"https://github.example.local/{owner}/{repo}/compare/{base_branch}...{branch_name}",
-            "artifact_file_path": str(artifact_path),
+            "artifact_file_paths": [str(path) for path in artifact_paths],
+            "changed_files": [str(change["path"]) for change in file_changes],
             "message": "Dry run only. Set PAYLOAD_MONITOR_GITHUB_DRY_RUN=false and PAYLOAD_MONITOR_GITHUB_TOKEN to push for real.",
         }
 
-    owner, repo = _repo_parts(repo_name)
-    headers = {
-        "Authorization": f"Bearer {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-
-    with httpx.Client(base_url=GITHUB_API_URL, headers=headers, timeout=20.0) as client:
-        ref_response = client.get(f"/repos/{owner}/{repo}/git/ref/heads/{base_branch}")
-        ref_response.raise_for_status()
-        base_sha = ref_response.json()["object"]["sha"]
-
-        create_ref_response = client.post(
-            f"/repos/{owner}/{repo}/git/refs",
-            json={"ref": f"refs/heads/{branch_name}", "sha": base_sha},
-        )
-        create_ref_response.raise_for_status()
-
-        content_response = client.get(
-            f"/repos/{owner}/{repo}/contents/{target_file}",
-            params={"ref": base_branch},
-        )
-        content_response.raise_for_status()
-        existing_sha = content_response.json()["sha"]
-
-        update_response = client.put(
-            f"/repos/{owner}/{repo}/contents/{target_file}",
-            json={
-                "message": str(proposal["pr_title"]),
-                "content": base64.b64encode(str(proposal["updated_file_content"]).encode("utf-8")).decode("utf-8"),
-                "branch": branch_name,
-                "sha": existing_sha,
-            },
-        )
-        update_response.raise_for_status()
-
-        pr_response = client.post(
-            f"/repos/{owner}/{repo}/pulls",
-            json={
-                "title": str(proposal["pr_title"]),
-                "body": str(proposal["pr_body"]),
-                "head": branch_name,
-                "base": base_branch,
-            },
-        )
-        pr_response.raise_for_status()
+    push_result = github_service.create_branch_and_push_files(
+        repo_name=repo_name,
+        base_branch=base_branch,
+        new_branch=branch_name,
+        files=[
+            {"path": str(change["path"]), "updated_content": str(change["updated_content"])}
+            for change in file_changes
+        ],
+        commit_message=str(proposal["pr_title"]),
+    )
+    pr_result = github_service.create_pull_request(
+        repo_name=repo_name,
+        base_branch=base_branch,
+        new_branch=branch_name,
+        title=str(proposal["pr_title"]),
+        body=str(proposal["pr_body"]),
+    )
 
     return {
         "status": "applied",
         "base_branch": base_branch,
         "branch_name": branch_name,
-        "pull_request_url": pr_response.json()["html_url"],
-        "artifact_file_path": str(artifact_path),
+        "pull_request_url": pr_result["pull_request_url"],
+        "artifact_file_paths": [str(path) for path in artifact_paths],
+        "changed_files": [str(change["path"]) for change in file_changes],
+        "compare_url": push_result["compare_url"],
         "message": "Branch pushed and pull request created.",
     }
 

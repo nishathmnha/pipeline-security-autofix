@@ -109,6 +109,41 @@ class NonAiFlowTests(unittest.TestCase):
         self.assertEqual(detail_json["console"]["line_count"], 3)
         self.assertEqual(detail_json["console"]["raw_text"], console_text)
 
+    def test_analyze_event_categorizes_va_and_other_issues(self) -> None:
+        console_text = """
+===== scan-dependencies.log =====
+
+pom.xml (pom)
+=============
+│                  Library                  │  Vulnerability   │ Severity │ Status │ Installed Version │        Fixed Version        │                            Title                             │
+│ org.apache.logging.log4j:log4j-core       │ CVE-2021-44228   │ CRITICAL │ fixed  │ 2.14.1            │ 2.17.1                      │ log4j-core remote code execution                             │
+ERROR Deployment blocked.
+""".strip()
+        payload = {
+            "job_name": "demo-job",
+            "build_number": 18,
+            "build_url": "http://jenkins.example/job/demo-job/18/",
+            "repo": "acme/payment-service",
+            "branch": "qa",
+            "status": "FAILED",
+            "console_text": console_text,
+        }
+
+        webhook_response = self.client.post("/api/v1/webhooks/jenkins/failure", json=payload)
+        self.assertEqual(webhook_response.status_code, 202)
+        event_id = webhook_response.json()["event_id"]
+
+        analyze_response = self.client.post(f"/api/events/{event_id}/analyze")
+        self.assertEqual(analyze_response.status_code, 200)
+        analysis = analyze_response.json()
+
+        self.assertTrue(analysis["supported"])
+        self.assertEqual(analysis["issue_counts"]["VA"], 1)
+        self.assertEqual(analysis["issue_counts"]["OTHER"], 1)
+        self.assertEqual(analysis["issue_list"][0]["issue_category"], "VA")
+        self.assertEqual(analysis["issue_list"][0]["package_name"], "org.apache.logging.log4j:log4j-core")
+        self.assertIn("CVE-2021-44228", analysis["issue_list"][0]["cve_ids"])
+
     def test_minimal_tester_ui_renders(self) -> None:
         response = self.client.get("/tester")
         self.assertEqual(response.status_code, 200)
@@ -116,6 +151,64 @@ class NonAiFlowTests(unittest.TestCase):
         self.assertIn("GitHub Fetch By Repo And Branch", response.text)
         self.assertIn("Push New Fix Branch To GitHub", response.text)
         self.assertIn("Target path (optional)", response.text)
+
+    def test_prepare_fix_builds_bom_safe_property_plan(self) -> None:
+        pom_path = self.temp_dir / "repo" / "pom.xml"
+        pom_path.parent.mkdir(parents=True, exist_ok=True)
+        pom_path.write_text(
+            """
+<project>
+  <properties>
+    <log4j2.version>2.14.1</log4j2.version>
+  </properties>
+  <dependencies>
+    <dependency>
+      <groupId>org.apache.logging.log4j</groupId>
+      <artifactId>log4j-core</artifactId>
+      <version>${log4j2.version}</version>
+    </dependency>
+  </dependencies>
+</project>
+""".strip(),
+            encoding="utf-8",
+        )
+
+        console_text = """
+===== scan-dependencies.log =====
+
+pom.xml (pom)
+=============
+│                  Library                  │  Vulnerability   │ Severity │ Status │ Installed Version │        Fixed Version        │                            Title                             │
+│ org.apache.logging.log4j:log4j-core       │ CVE-2021-44228   │ CRITICAL │ fixed  │ 2.14.1            │ 2.17.1                      │ log4j-core remote code execution                             │
+ERROR Deployment blocked.
+""".strip()
+        payload = {
+            "job_name": "demo-job",
+            "build_number": 19,
+            "build_url": "http://jenkins.example/job/demo-job/19/",
+            "repo": "acme/payment-service",
+            "branch": "qa",
+            "status": "FAILED",
+            "local_repo_path": str(pom_path.parent),
+            "console_text": console_text,
+        }
+
+        webhook_response = self.client.post("/api/v1/webhooks/jenkins/failure", json=payload)
+        self.assertEqual(webhook_response.status_code, 202)
+        event_id = webhook_response.json()["event_id"]
+
+        prepare_response = self.client.post(f"/api/events/{event_id}/prepare-fix")
+        self.assertEqual(prepare_response.status_code, 200)
+        proposal = prepare_response.json()
+
+        self.assertEqual(proposal["status"], "ready")
+        self.assertTrue(proposal["validated_change_plan"]["validation_passed"])
+        self.assertFalse(proposal["validated_change_plan"]["manual_review_required"])
+        self.assertEqual(len(proposal["validated_change_plan"]["file_changes"]), 1)
+        file_change = proposal["validated_change_plan"]["file_changes"][0]
+        self.assertEqual(file_change["change_type"], "maven-property-upgrade")
+        self.assertEqual(file_change["path"], "pom.xml")
+        self.assertIn("<log4j2.version>2.17.1</log4j2.version>", file_change["updated_content"])
 
     def test_fetch_analysis_files_reads_expected_files_from_repo_branch(self) -> None:
         fake_client = FakeHttpClient(
@@ -400,10 +493,19 @@ class NonAiFlowTests(unittest.TestCase):
                 "proposal_id": "fp_livepush1",
                 "status": "ready",
                 "branch_name": "va-fix-cve-2026-1111",
-                "target_file": "Dockerfile",
                 "pr_title": "Fix vulnerability in Dockerfile",
                 "pr_body": "Automated remediation proposal.",
-                "updated_file_content": "FROM eclipse-temurin:21.0.3_9-jre",
+                "validated_change_plan": {
+                    "validation_passed": True,
+                    "manual_review_required": False,
+                    "validation_notes": [],
+                    "file_changes": [
+                        {
+                            "path": "Dockerfile",
+                            "updated_content": "FROM eclipse-temurin:21.0.3_9-jre",
+                        }
+                    ],
+                },
             },
         )
         monitor_app.store.add(event)
@@ -447,7 +549,9 @@ class NonAiFlowTests(unittest.TestCase):
 
         with patch.object(monitor_app, "GITHUB_DRY_RUN", False), patch.object(
             monitor_app, "GITHUB_TOKEN", "test-token"
-        ), patch.object(monitor_app.httpx, "Client", return_value=fake_client):
+        ), patch.object(github_branch_ops, "GITHUB_TOKEN", "test-token"), patch.object(
+            github_branch_ops.httpx, "Client", return_value=fake_client
+        ):
             response = self.client.post("/api/events/evt_livepush1/apply-fix", json={"base_branch": "qa"})
 
         self.assertEqual(response.status_code, 200)
@@ -456,8 +560,9 @@ class NonAiFlowTests(unittest.TestCase):
         self.assertEqual(result["base_branch"], "qa")
         self.assertEqual(result["branch_name"], "va-fix-cve-2026-1111")
         self.assertEqual(result["pull_request_url"], "https://github.com/acme/payment-service/pull/91")
+        self.assertEqual(result["changed_files"], ["Dockerfile"])
 
-        artifact_path = Path(result["artifact_file_path"])
+        artifact_path = Path(result["artifact_file_paths"][0])
         self.assertTrue(artifact_path.exists())
         self.assertEqual(artifact_path.read_text(encoding="utf-8"), "FROM eclipse-temurin:21.0.3_9-jre")
 
