@@ -17,6 +17,7 @@ BOX_TOP_LEFT = "\u250c"
 BOX_BOTTOM_LEFT = "\u2514"
 BOX_TEE_LEFT = "\u251c"
 SPRING_BOOT_PARENT = ("org.springframework.boot", "spring-boot-starter-parent")
+DEFAULT_SPRING_BOOT_3_TARGET = "3.4.5"
 SPRING_BOOT_BOM_PREFIXES = (
     "ch.qos.logback:",
     "com.fasterxml.jackson.",
@@ -36,10 +37,13 @@ class FlowState(TypedDict, total=False):
     file_paths: list[str]
     issues: list[dict[str, Any]]
     files: dict[str, str]
+    source_files: dict[str, str]
     resolved_paths: list[dict[str, Any]]
     plan: dict[str, Any]
     branch_name: str
     push_result: dict[str, Any]
+    iteration_count: int
+    remaining_issues: list[dict[str, Any]]
 
 
 def _now() -> str:
@@ -84,6 +88,10 @@ def _payload_paths(payload: dict[str, Any]) -> list[str]:
 
 def _fixed_versions(value: str) -> list[str]:
     return _unique([part.strip() for part in value.split(",") if part.strip()])
+
+
+def _version_key(value: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in re.findall(r"\d+", value) or ["0"])
 
 
 def _payload_console_text(payload: dict[str, Any]) -> str:
@@ -200,10 +208,18 @@ def extract_issues_node(state: FlowState) -> FlowState:
                             "installed_version": current_installed or None,
                             "fixed_versions": [],
                             "cve_ids": [],
+                            "vulnerabilities": [],
                         },
                     )
                     item["fixed_versions"].extend(_fixed_versions(fixed_version))
                     item["cve_ids"].append(vulnerability.upper())
+                    item["vulnerabilities"].append(
+                        {
+                            "cve_id": vulnerability.upper(),
+                            "severity": current_severity,
+                            "fixed_versions": _fixed_versions(fixed_version),
+                        }
+                    )
                     continue
 
         if stripped and not _table_border(stripped):
@@ -219,6 +235,8 @@ def extract_issues_node(state: FlowState) -> FlowState:
                 "installed_version": item["installed_version"],
                 "fixed_versions": _unique(item["fixed_versions"]),
                 "cve_ids": _unique(item["cve_ids"]),
+                "severity": item["severity"],
+                "vulnerabilities": item["vulnerabilities"],
                 "detailed_issue": f"{item['package_name']} in {item['target_file']} is vulnerable.",
                 "initial_fix": "Prefer the parent/BOM/property owner over scattered direct overrides.",
             }
@@ -280,17 +298,8 @@ def fetch_repo_context_node(state: FlowState) -> FlowState:
             else github_service.fetch_analysis_files(repo, branch)
         )
 
-    resolved_paths: list[dict[str, Any]] = []
-    available = list(files.keys())
-    for index, issue in enumerate(issues):
-        hint = str(issue.get("target_file_hint", "") or "")
-        name = PurePosixPath(hint).name if hint else ""
-        match = next((path for path in available if name and PurePosixPath(path).name == name), "")
-        if not match and file_paths:
-            match = file_paths[0]
-        resolved_paths.append({"issue_index": index, "path": match})
-
-    return {"files": files, "resolved_paths": resolved_paths}
+    resolved_paths = _resolve_issue_paths(issues, file_paths, files)
+    return {"files": files, "source_files": dict(files), "resolved_paths": resolved_paths}
 
 
 def _parse_pom(content: str) -> dict[str, Any]:
@@ -329,14 +338,11 @@ def _pick_target_version(current_version: str | None, fixed_versions: list[str])
     if not fixed_versions:
         return None
 
-    def version_key(value: str) -> tuple[int, ...]:
-        return tuple(int(part) for part in re.findall(r"\d+", value) or ["0"])
-
-    ordered = sorted(_unique(fixed_versions), key=version_key)
+    ordered = sorted(_unique(fixed_versions), key=_version_key)
     if not current_version:
         return ordered[-1]
 
-    current_key = version_key(current_version)
+    current_key = _version_key(current_version)
     current_major = re.match(r"(\d+)", current_version)
 
     same_major_greater = [
@@ -345,12 +351,12 @@ def _pick_target_version(current_version: str | None, fixed_versions: list[str])
         if current_major
         and (version_major := re.match(r"(\d+)", version))
         and version_major.group(1) == current_major.group(1)
-        and version_key(version) > current_key
+        and _version_key(version) > current_key
     ]
     if same_major_greater:
         return same_major_greater[-1]
 
-    any_greater = [version for version in ordered if version_key(version) > current_key]
+    any_greater = [version for version in ordered if _version_key(version) > current_key]
     if any_greater:
         return any_greater[-1]
 
@@ -365,6 +371,45 @@ def _pick_target_version(current_version: str | None, fixed_versions: list[str])
         return same_major[-1]
 
     return ordered[-1]
+
+
+def _pick_target_version_for_issue(issue: dict[str, Any]) -> str | None:
+    current_version = issue.get("installed_version")
+    fixed_versions = list(issue.get("fixed_versions", []))
+    vulnerabilities = list(issue.get("vulnerabilities", []))
+    current_major = _version_major(current_version)
+
+    if not vulnerabilities or not current_major:
+        return _pick_target_version(current_version, fixed_versions)
+
+    required_same_major: list[str] = []
+    for vulnerability in vulnerabilities:
+        same_major_candidates = [
+            version
+            for version in vulnerability.get("fixed_versions", [])
+            if _version_major(version) == current_major
+        ]
+        if not same_major_candidates:
+            return sorted(_unique(fixed_versions), key=_version_key)[-1] if fixed_versions else None
+        required_same_major.append(sorted(_unique(same_major_candidates), key=_version_key)[-1])
+
+    if not required_same_major:
+        return _pick_target_version(current_version, fixed_versions)
+
+    return sorted(_unique(required_same_major), key=_version_key)[-1]
+
+
+def _version_major(value: str | None) -> str | None:
+    if not value:
+        return None
+    match = re.match(r"(\d+)", value)
+    return match.group(1) if match else None
+
+
+def _requires_major_upgrade(current_version: str | None, target_version: str | None) -> bool:
+    current_major = _version_major(current_version)
+    target_major = _version_major(target_version)
+    return bool(current_major and target_major and current_major != target_major)
 
 
 def _replace_property(content: str, property_name: str, old: str, new: str) -> str:
@@ -457,14 +502,26 @@ def _spring_boot_parent_upgrade(pom: dict[str, Any], issues: list[dict[str, Any]
         ),
         None,
     )
-    if not owner_issue or owner_issue.get("installed_version") != current_version:
+    if owner_issue and owner_issue.get("installed_version") == current_version:
+        target_version = _pick_target_version_for_issue(owner_issue)
+        if target_version and target_version != current_version:
+            return {"current_version": current_version, "target_version": target_version}
+
+    current_parent_major = _version_major(current_version)
+    if current_parent_major != "2":
         return None
 
-    target_version = _pick_target_version(current_version, list(owner_issue.get("fixed_versions", [])))
-    if not target_version or target_version == current_version:
-        return None
+    for issue in issues:
+        package_name = str(issue.get("package_name", "") or "")
+        target_dependency_version = _pick_target_version_for_issue(issue)
+        if (
+            package_name.startswith("org.springframework:")
+            and _version_major(target_dependency_version) == "6"
+            and DEFAULT_SPRING_BOOT_3_TARGET != current_version
+        ):
+            return {"current_version": current_version, "target_version": DEFAULT_SPRING_BOOT_3_TARGET}
 
-    return {"current_version": current_version, "target_version": target_version}
+    return None
 
 
 def _is_spring_boot_bom_managed_issue(package_name: str, dependency: dict[str, Any] | None) -> bool:
@@ -475,12 +532,135 @@ def _is_spring_boot_bom_managed_issue(package_name: str, dependency: dict[str, A
     return not dependency.get("version") and not dependency.get("version_property")
 
 
+def _resolve_issue_paths(
+    issues: list[dict[str, Any]],
+    file_paths: list[str],
+    files: dict[str, str],
+) -> list[dict[str, Any]]:
+    resolved_paths: list[dict[str, Any]] = []
+    available = list(files.keys())
+    for index, issue in enumerate(issues):
+        hint = str(issue.get("target_file_hint", "") or "")
+        name = PurePosixPath(hint).name if hint else ""
+        match = next((path for path in available if name and PurePosixPath(path).name == name), "")
+        if not match and hint in files:
+            match = hint
+        if not match and file_paths:
+            match = file_paths[0]
+        resolved_paths.append({"issue_index": index, "path": match})
+    return resolved_paths
+
+
+def _effective_dependency_version(pom: dict[str, Any], dependency: dict[str, Any] | None) -> str | None:
+    if not dependency:
+        return None
+    version = dependency.get("version")
+    if version:
+        return str(version)
+    property_name = dependency.get("version_property")
+    if property_name:
+        return str(pom.get("properties", {}).get(property_name) or "") or None
+    return None
+
+
+def _issue_is_resolved_in_pom(pom: dict[str, Any], issue: dict[str, Any]) -> bool:
+    package_name = str(issue.get("package_name", "") or "")
+    target_version = _pick_target_version_for_issue(issue)
+    if ":" not in package_name or not target_version:
+        return False
+
+    group_id, artifact_id = package_name.split(":", 1)
+    parent = pom.get("parent") or {}
+    dependency = next(
+        (
+            item
+            for item in pom.get("dependencies", [])
+            if item.get("group_id") == group_id and item.get("artifact_id") == artifact_id
+        ),
+        None,
+    )
+
+    effective_version: str | None = None
+    if package_name == "org.springframework.boot:spring-boot":
+        effective_version = str(parent.get("version") or "") or None
+    else:
+        effective_version = _effective_dependency_version(pom, dependency)
+
+    if effective_version:
+        if _version_major(effective_version) == _version_major(target_version):
+            return _version_key(effective_version) >= _version_key(target_version)
+        return _version_key(effective_version) >= _version_key(target_version)
+
+    if (
+        (parent.get("group_id"), parent.get("artifact_id")) == SPRING_BOOT_PARENT
+        and _is_spring_boot_bom_managed_issue(package_name, dependency)
+        and _version_major(str(parent.get("version") or "")) == "3"
+        and _version_major(target_version) == "6"
+    ):
+        return True
+
+    return False
+
+
+def simulate_rescan_node(state: FlowState) -> FlowState:
+    files = state.get("files", {})
+    file_paths = state.get("file_paths", [])
+    issues = state.get("issues", [])
+    plan = dict(state.get("plan", {}))
+    iteration_count = int(state.get("iteration_count", 0) or 0) + 1
+
+    remaining_issues: list[dict[str, Any]] = []
+    for item in state.get("resolved_paths", []):
+        issue_index = int(item.get("issue_index", -1))
+        path = str(item.get("path", "") or "")
+        if not (0 <= issue_index < len(issues)) or not path or path not in files:
+            continue
+        issue = issues[issue_index]
+        if str(issue.get("issue_category", "")).upper() != "VA":
+            continue
+        if PurePosixPath(path).name.lower() != "pom.xml":
+            remaining_issues.append(issue)
+            continue
+        try:
+            pom = _parse_pom(files[path])
+        except ET.ParseError:
+            remaining_issues.append(issue)
+            continue
+        if not _issue_is_resolved_in_pom(pom, issue):
+            remaining_issues.append(issue)
+
+    current_va_issues = [issue for issue in issues if str(issue.get("issue_category", "")).upper() == "VA"]
+    retry_requested = bool(remaining_issues) and len(remaining_issues) < len(current_va_issues) and iteration_count < 3
+
+    simulation = dict(plan.get("simulation", {}))
+    passes = list(simulation.get("passes", []))
+    passes.append(
+        {
+            "pass_index": iteration_count,
+            "remaining_va_count": len(remaining_issues),
+            "remaining_packages": [str(issue.get("package_name", "") or "") for issue in remaining_issues],
+            "retry_requested": retry_requested,
+        }
+    )
+    simulation["passes"] = passes
+    simulation["final_remaining_va_count"] = len(remaining_issues)
+    plan["simulation"] = simulation
+
+    return {
+        "plan": plan,
+        "iteration_count": iteration_count,
+        "remaining_issues": remaining_issues,
+        "issues": remaining_issues if retry_requested else issues,
+        "resolved_paths": _resolve_issue_paths(remaining_issues, file_paths, files) if retry_requested else state.get("resolved_paths", []),
+    }
+
+
 def validate_and_prepare_changes_node(state: FlowState) -> FlowState:
     files = dict(state.get("files", {}))
+    source_files = dict(state.get("source_files", files))
     issues = state.get("issues", [])
     resolved_paths = state.get("resolved_paths", [])
     notes: list[str] = []
-    original_files = dict(files)
     path_issue_map: dict[str, list[int]] = {}
     for item in resolved_paths:
         path = str(item.get("path", "") or "")
@@ -502,10 +682,14 @@ def validate_and_prepare_changes_node(state: FlowState) -> FlowState:
             continue
 
         updated = original
+        parent = pom.get("parent") or {}
+        has_spring_boot_parent = (
+            parent.get("group_id"),
+            parent.get("artifact_id"),
+        ) == SPRING_BOOT_PARENT
         path_issues = [issues[index] for index in issue_indexes if issues[index].get("issue_category") == "VA"]
         spring_boot_parent_upgrade = _spring_boot_parent_upgrade(pom, path_issues)
         if spring_boot_parent_upgrade:
-            parent = pom.get("parent") or {}
             if parent.get("version_property"):
                 property_name = str(parent["version_property"])
                 property_value = pom["properties"].get(property_name)
@@ -531,7 +715,7 @@ def validate_and_prepare_changes_node(state: FlowState) -> FlowState:
                 continue
 
             current_version = issue.get("installed_version")
-            target_version = _pick_target_version(current_version, list(issue.get("fixed_versions", [])))
+            target_version = _pick_target_version_for_issue(issue)
             if not current_version or not target_version:
                 continue
 
@@ -546,6 +730,26 @@ def validate_and_prepare_changes_node(state: FlowState) -> FlowState:
             )
 
             if package_name == "org.springframework.boot:spring-boot" and spring_boot_parent_upgrade:
+                continue
+
+            if (
+                spring_boot_parent_upgrade
+                and has_spring_boot_parent
+                and _is_spring_boot_bom_managed_issue(package_name, dependency)
+                and _requires_major_upgrade(current_version, target_version)
+            ):
+                continue
+
+            if (
+                has_spring_boot_parent
+                and _is_spring_boot_bom_managed_issue(package_name, dependency)
+                and _requires_major_upgrade(current_version, target_version)
+                and not spring_boot_parent_upgrade
+            ):
+                notes.append(
+                    f"{path}: {package_name} requires a Spring Boot/Spring Framework major upgrade "
+                    f"({current_version} -> {target_version}); automatic leaf override skipped."
+                )
                 continue
 
             next_updated = updated
@@ -569,7 +773,7 @@ def validate_and_prepare_changes_node(state: FlowState) -> FlowState:
         files[path] = updated
 
     file_changes: list[dict[str, Any]] = []
-    for path, original in original_files.items():
+    for path, original in source_files.items():
         updated = files.get(path, original)
         if updated == original:
             continue
@@ -581,8 +785,15 @@ def validate_and_prepare_changes_node(state: FlowState) -> FlowState:
                 diff.append(line)
         file_changes.append({"path": path, "updated_content": updated, "diff_preview": diff[:20]})
 
+    existing_plan = dict(state.get("plan", {}))
+    simulation = existing_plan.get("simulation")
+    plan = {"file_changes": file_changes, "notes": notes}
+    if simulation is not None:
+        plan["simulation"] = simulation
+
     return {
-        "plan": {"file_changes": file_changes, "notes": notes},
+        "files": files,
+        "plan": plan,
         "branch_name": f"ai-va-fix/{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
     }
 
@@ -616,16 +827,33 @@ def push_changes_to_branch_node(state: FlowState) -> FlowState:
     return {"push_result": push_result}
 
 
+def _next_step_after_rescan(state: FlowState) -> str:
+    simulation = dict(state.get("plan", {}).get("simulation", {}))
+    passes = list(simulation.get("passes", []))
+    if passes and passes[-1].get("retry_requested"):
+        return "validate_and_prepare_changes"
+    return "push_changes_to_branch"
+
+
 def build_graph():
     graph = StateGraph(FlowState)
     graph.add_node("extract_issues", extract_issues_node)
     graph.add_node("fetch_repo_context", fetch_repo_context_node)
     graph.add_node("validate_and_prepare_changes", validate_and_prepare_changes_node)
+    graph.add_node("simulate_rescan", simulate_rescan_node)
     graph.add_node("push_changes_to_branch", push_changes_to_branch_node)
     graph.add_edge(START, "extract_issues")
     graph.add_edge("extract_issues", "fetch_repo_context")
     graph.add_edge("fetch_repo_context", "validate_and_prepare_changes")
-    graph.add_edge("validate_and_prepare_changes", "push_changes_to_branch")
+    graph.add_edge("validate_and_prepare_changes", "simulate_rescan")
+    graph.add_conditional_edges(
+        "simulate_rescan",
+        _next_step_after_rescan,
+        {
+            "validate_and_prepare_changes": "validate_and_prepare_changes",
+            "push_changes_to_branch": "push_changes_to_branch",
+        },
+    )
     graph.add_edge("push_changes_to_branch", END)
     return graph.compile()
 
@@ -636,6 +864,7 @@ def _base_state(payload: dict[str, Any], local_repo_path: str | None, push_enabl
         "console_text": _payload_console_text(payload),
         "local_repo_path": _effective_local_repo_path(payload, local_repo_path),
         "push_enabled": push_enabled,
+        "iteration_count": 0,
     }
 
 

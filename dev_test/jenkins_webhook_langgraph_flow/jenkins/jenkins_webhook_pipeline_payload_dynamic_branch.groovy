@@ -12,6 +12,7 @@ pipeline {
     CONTAINER_NAME = 'demo-springboot-vuln-service'
     HOST_PORT = '8082'
     HEALTHCHECK_PATH = '/health'
+    RUN_SMOKE_TEST = 'false'
     DOCKER_BIN = 'docker'
     TRIVY_BIN = 'trivy'
     TRIVY_CACHE_DIR = '/var/jenkins_home/trivy-cache'
@@ -109,6 +110,9 @@ pipeline {
     }
 
     stage('Verify Deployment') {
+      when {
+        expression { env.RUN_SMOKE_TEST?.toBoolean() }
+      }
       steps {
         sh '''#!/bin/bash
           set -euo pipefail

@@ -195,10 +195,14 @@ class WebhookLangGraphFlowTests(unittest.TestCase):
 
         proposal = workflow.run_prepare_fix(payload, event_id="multi-edit-pom")
         updated_content = proposal["plan"]["file_changes"][0]["updated_content"]
+        simulation = proposal["plan"]["simulation"]
 
         self.assertIn("<log4j2.version>2.17.1</log4j2.version>", updated_content)
         self.assertIn("<version>1.31</version>", updated_content)
         self.assertNotIn("<version>1.30</version>", updated_content)
+        self.assertEqual(simulation["final_remaining_va_count"], 0)
+        self.assertEqual(len(simulation["passes"]), 1)
+        self.assertFalse(simulation["passes"][0]["retry_requested"])
 
     def test_run_prepare_fix_uses_spring_boot_parent_as_bom_owner(self) -> None:
         service_dir = self.temp_dir / "demo-springboot-vuln-service-parent"
@@ -333,6 +337,178 @@ class WebhookLangGraphFlowTests(unittest.TestCase):
         self.assertNotIn("org.apache.tomcat.embed:tomcat-embed-core", notes_text)
         self.assertNotIn("org.springframework:spring-core", notes_text)
 
+    def test_run_prepare_fix_upgrades_boot_parent_for_cross_major_spring_web_issue(self) -> None:
+        service_dir = self.temp_dir / "demo-springboot-vuln-service-cross-major"
+        service_dir.mkdir(parents=True, exist_ok=True)
+        (service_dir / "pom.xml").write_text(
+            """
+<project>
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>2.7.18</version>
+  </parent>
+  <properties>
+    <java.version>17</java.version>
+  </properties>
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.yaml</groupId>
+      <artifactId>snakeyaml</artifactId>
+      <version>1.31</version>
+    </dependency>
+  </dependencies>
+</project>
+""".strip(),
+            encoding="utf-8",
+        )
+
+        payload = {
+            "repo": "nishathmnha/demo-springboot-vuln-service",
+            "branch": "main",
+            "local_repo_path": str(service_dir),
+            "console_output": "\n".join(
+                [
+                    "pom.xml (pom)",
+                    f"{BOX}                  Library                  {BOX}  Vulnerability   {BOX} Severity {BOX} Status {BOX} Installed Version {BOX}        Fixed Version        {BOX}                            Title                             {BOX}",
+                    f"{BOX} org.springframework:spring-web            {BOX} CVE-2016-1000027 {BOX} CRITICAL {BOX} fixed  {BOX} 5.3.34            {BOX} 6.0.0                       {BOX} spring web                                                    {BOX}",
+                    f"{BOX} org.yaml:snakeyaml                        {BOX} CVE-2022-1471    {BOX} HIGH     {BOX}        {BOX} 1.31              {BOX} 2.0                         {BOX} snakeyaml                                                     {BOX}",
+                ]
+            ),
+            "dependency_file_paths": ["pom.xml"],
+        }
+
+        proposal = workflow.run_prepare_fix(payload, event_id="spring-web-cross-major")
+        updated_content = proposal["plan"]["file_changes"][0]["updated_content"]
+        notes_text = "\n".join(proposal["plan"]["notes"])
+
+        self.assertIn("<artifactId>spring-boot-starter-parent</artifactId>", updated_content)
+        self.assertIn("<version>3.4.5</version>", updated_content)
+        self.assertIn("<artifactId>snakeyaml</artifactId>", updated_content)
+        self.assertIn("<version>2.0</version>", updated_content)
+        self.assertNotIn("<artifactId>spring-web</artifactId>", updated_content)
+        self.assertEqual(notes_text, "")
+
+    def test_run_prepare_fix_handles_spring_web_spring_core_and_snakeyaml_together(self) -> None:
+        service_dir = self.temp_dir / "demo-springboot-vuln-service-mixed-spring"
+        service_dir.mkdir(parents=True, exist_ok=True)
+        (service_dir / "pom.xml").write_text(
+            """
+<project>
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>2.7.18</version>
+  </parent>
+  <properties>
+    <java.version>17</java.version>
+  </properties>
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.yaml</groupId>
+      <artifactId>snakeyaml</artifactId>
+      <version>1.31</version>
+    </dependency>
+  </dependencies>
+</project>
+""".strip(),
+            encoding="utf-8",
+        )
+
+        payload = {
+            "repo": "nishathmnha/demo-springboot-vuln-service",
+            "branch": "main",
+            "local_repo_path": str(service_dir),
+            "console_output": "\n".join(
+                [
+                    "pom.xml (pom)",
+                    f"{BOX}             Library             {BOX}  Vulnerability   {BOX} Severity {BOX} Status {BOX} Installed Version {BOX} Fixed Version {BOX} Title {BOX}",
+                    f"{BOX} org.springframework:spring-core {BOX} CVE-2025-41249   {BOX} HIGH     {BOX} fixed  {BOX} 6.2.6             {BOX} 6.2.11        {BOX} spring-core {BOX}",
+                    f"{BOX} org.springframework:spring-web  {BOX} CVE-2016-1000027 {BOX} CRITICAL {BOX}        {BOX} 5.3.34            {BOX} 6.0.0         {BOX} spring-web {BOX}",
+                    f"{BOX} org.yaml:snakeyaml              {BOX} CVE-2022-1471    {BOX} HIGH     {BOX}        {BOX} 1.31              {BOX} 2.0           {BOX} snakeyaml {BOX}",
+                ]
+            ),
+            "dependency_file_paths": ["pom.xml"],
+        }
+
+        proposal = workflow.run_prepare_fix(payload, event_id="mixed-spring-remediation")
+        updated_content = proposal["plan"]["file_changes"][0]["updated_content"]
+        notes_text = "\n".join(proposal["plan"]["notes"])
+
+        self.assertIn("<artifactId>spring-boot-starter-parent</artifactId>", updated_content)
+        self.assertIn("<version>3.4.5</version>", updated_content)
+        self.assertIn("<artifactId>snakeyaml</artifactId>", updated_content)
+        self.assertIn("<version>2.0</version>", updated_content)
+        self.assertIn("<artifactId>spring-core</artifactId>", updated_content)
+        self.assertIn("<version>6.2.11</version>", updated_content)
+        self.assertNotIn("<artifactId>spring-web</artifactId>", updated_content)
+        self.assertEqual(notes_text, "")
+
+    def test_run_prepare_fix_uses_cross_major_target_when_grouped_cves_need_it(self) -> None:
+        service_dir = self.temp_dir / "demo-springboot-vuln-service-grouped-cves"
+        service_dir.mkdir(parents=True, exist_ok=True)
+        (service_dir / "pom.xml").write_text(
+            """
+<project>
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>2.7.18</version>
+  </parent>
+  <properties>
+    <java.version>17</java.version>
+  </properties>
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.yaml</groupId>
+      <artifactId>snakeyaml</artifactId>
+      <version>1.30</version>
+    </dependency>
+  </dependencies>
+</project>
+""".strip(),
+            encoding="utf-8",
+        )
+
+        payload = {
+            "repo": "nishathmnha/demo-springboot-vuln-service",
+            "branch": "main",
+            "local_repo_path": str(service_dir),
+            "console_output": "\n".join(
+                [
+                    "pom.xml (pom)",
+                    f"{BOX}             Library             {BOX}  Vulnerability   {BOX} Severity {BOX} Status {BOX} Installed Version {BOX} Fixed Version {BOX} Title {BOX}",
+                    f"{BOX} org.springframework:spring-web  {BOX} CVE-2016-1000027 {BOX} CRITICAL {BOX}        {BOX} 5.3.31            {BOX} 6.0.0         {BOX} spring-web {BOX}",
+                    f"{BOX}                               {BOX} CVE-2024-22262   {BOX} HIGH     {BOX}        {BOX}                   {BOX} 5.3.34, 6.1.6 {BOX} spring-web {BOX}",
+                    f"{BOX} org.yaml:snakeyaml           {BOX} CVE-2022-1471    {BOX} HIGH     {BOX}        {BOX} 1.30              {BOX} 2.0           {BOX} snakeyaml {BOX}",
+                    f"{BOX}                               {BOX} CVE-2022-25857   {BOX} HIGH     {BOX}        {BOX}                   {BOX} 1.31          {BOX} snakeyaml {BOX}",
+                ]
+            ),
+            "dependency_file_paths": ["pom.xml"],
+        }
+
+        proposal = workflow.run_prepare_fix(payload, event_id="grouped-cves-cross-major")
+        updated_content = proposal["plan"]["file_changes"][0]["updated_content"]
+        simulation = proposal["plan"]["simulation"]
+
+        self.assertIn("<artifactId>spring-boot-starter-parent</artifactId>", updated_content)
+        self.assertIn("<version>3.4.5</version>", updated_content)
+        self.assertIn("<artifactId>snakeyaml</artifactId>", updated_content)
+        self.assertIn("<version>2.0</version>", updated_content)
+        self.assertEqual(simulation["final_remaining_va_count"], 0)
+
     def test_run_prepare_fix_raises_clear_error_for_sample_repo_without_local_files(self) -> None:
         payload = {
             "repo": "owner/repo",
@@ -343,6 +519,48 @@ class WebhookLangGraphFlowTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "sample placeholder 'owner/repo'"):
             workflow.run_prepare_fix(payload, event_id="missing-local-repo")
+
+    def test_run_prepare_fix_reports_remaining_unresolved_issues_in_simulation(self) -> None:
+        service_dir = self.temp_dir / "demo-springboot-vuln-service-unresolved"
+        service_dir.mkdir(parents=True, exist_ok=True)
+        (service_dir / "pom.xml").write_text(
+            """
+<project>
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>2.7.18</version>
+  </parent>
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+</project>
+""".strip(),
+            encoding="utf-8",
+        )
+
+        payload = {
+            "repo": "nishathmnha/demo-springboot-vuln-service",
+            "branch": "main",
+            "local_repo_path": str(service_dir),
+            "console_output": "\n".join(
+                [
+                    "pom.xml (pom)",
+                    f"{BOX}             Library             {BOX}  Vulnerability   {BOX} Severity {BOX} Status {BOX} Installed Version {BOX} Fixed Version {BOX} Title {BOX}",
+                    f"{BOX} org.apache.logging.log4j:log4j-core {BOX} CVE-2021-44228 {BOX} CRITICAL {BOX} fixed  {BOX} 2.14.1            {BOX} 2.17.1        {BOX} log4j-core {BOX}",
+                ]
+            ),
+            "dependency_file_paths": ["pom.xml"],
+        }
+
+        proposal = workflow.run_prepare_fix(payload, event_id="unresolved-simulation")
+        simulation = proposal["plan"]["simulation"]
+
+        self.assertEqual(simulation["final_remaining_va_count"], 1)
+        self.assertEqual(simulation["passes"][0]["remaining_packages"], ["org.apache.logging.log4j:log4j-core"])
+        self.assertFalse(simulation["passes"][0]["retry_requested"])
 
     def test_sample_payload_falls_back_to_github_fetch_and_pushes_a_branch(self) -> None:
         payload = {
