@@ -1,5 +1,4 @@
-def main():
-    print("Hello from pipeline-security-autofix!")
+from pipeline_security_autofix.main import main
 
 
 if __name__ == "__main__":

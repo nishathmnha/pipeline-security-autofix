@@ -1,18 +1,25 @@
 [project]
 name = "pipeline-security-autofix"
 version = "0.1.0"
-description = "Add your description here"
+description = "FastAPI and LangGraph service for automated CI/CD vulnerability remediation"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
-    "dotenv>=0.9.9",
+    "annotated-doc>=0.0.4",
     "fastapi>=0.136.1",
     "httpx>=0.28.1",
-    "ipykernel>=7.2.0",
     "langchain>=1.2.15",
     "langchain-openai>=1.2.1",
     "langgraph>=1.1.10",
     "pydantic>=2.13.3",
     "pydantic-settings>=2.14.0",
+    "python-dotenv>=1.1.1",
     "uvicorn>=0.46.0",
 ]
+
+[project.scripts]
+pipeline-security-autofix = "pipeline_security_autofix.main:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"

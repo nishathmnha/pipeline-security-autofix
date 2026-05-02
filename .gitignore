@@ -2,3 +2,14 @@
 dev_test/py/.test_tmp/
 dev_test/py/__pycache__/
 dev_test/py/runtime/
+.venv/
+__pycache__/
+tmp_*/
+pytest-cache-files-*/
+dev_test/notebook/
+dev_test/py/
+dev_test/jenkins_webhook_langgraph_flow/notebook/
+dev_test/jenkins_webhook_langgraph_flow/tests/.test_tmp/
+dev_test/jenkins_webhook_langgraph_flow/python/webhook_langgraph_flow/runtime/
+system_design/exports/
+.env

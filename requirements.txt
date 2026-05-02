@@ -1,9 +1,10 @@
+annotated-doc
 fastapi
 httpx
+langchain
+langchain-openai
+langgraph
+python-dotenv
 pydantic
 pydantic-settings
 uvicorn
-dotenv
-ipykernal
-langchain_openai
-langgraph
